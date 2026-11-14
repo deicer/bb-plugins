@@ -96,6 +96,26 @@ export function disconnectModel(file: ModelsFile, providerId: string, modelId: s
   return true;
 }
 
+// Выключение модели: запись переезжает в kv плагина, настройки сохраняются.
+export function removeModelEntry(file: ModelsFile, providerId: string, modelId: string): ModelEntry | null {
+  const models = modelsArray(provider(file, providerId));
+  const index = models.findIndex((model) => model.id === modelId);
+  if (index < 0) return null;
+  const [entry] = models.splice(index, 1);
+  return entry!;
+}
+
+export function addModelEntry(file: ModelsFile, providerId: string, entry: ModelEntry): boolean {
+  const models = modelsArray(provider(file, providerId));
+  if (models.some((model) => model.id === entry.id)) return false;
+  models.push(entry);
+  return true;
+}
+
+export function hasModel(file: ModelsFile, providerId: string, modelId: string): boolean {
+  return modelsArray(provider(file, providerId)).some((model) => model.id === modelId);
+}
+
 export function updateModel(
   file: ModelsFile, providerId: string, modelId: string, patch: ModelPatch,
 ): ModelEntry {
@@ -116,6 +136,7 @@ export function listProviders(file: ModelsFile): ProviderView[] {
     baseUrl: typeof entry.baseUrl === "string" ? entry.baseUrl : "",
     api: typeof entry.api === "string" ? entry.api : "openai-completions",
     apiKeySet: typeof entry.apiKey === "string" && entry.apiKey.length > 0,
+    disabled: [],
     models: (Array.isArray(entry.models) ? entry.models : [])
       .filter((model): model is ModelEntry =>
         !!model && typeof model === "object" && typeof (model as Record<string, unknown>).id === "string")

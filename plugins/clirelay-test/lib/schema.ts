@@ -55,6 +55,7 @@ export const MODEL_FIELDS: readonly ModelFieldSpec[] = [
 export interface ProviderView {
   id: string; name?: string; baseUrl: string; api: string; apiKeySet: boolean;
   models: Array<{ id: string } & Record<string, unknown>>;
+  disabled: Array<{ id: string } & Record<string, unknown>>;
 }
 
 // Провайдеры на одном адресе показываются вложенно под общей группой.

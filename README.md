@@ -67,15 +67,10 @@ bb plugin install git:https://github.com/deicer/bb-plugins.git@main --plugin ses
 Вместо `session-history` можно указать другой идентификатор:
 
 ```text
+clirelay-test
 file-manager-multi-host
 kanban-board
 ru
-```
-
-`clirelay-test` («Api модели») пока живёт в форке [EvgenyGulyaev/bb-plugins](https://github.com/EvgenyGulyaev/bb-plugins) (ветка `feat/session-history-cli-sources`):
-
-```powershell
-bb plugin install git:https://github.com/EvgenyGulyaev/bb-plugins.git@feat/session-history-cli-sources --plugin clirelay-test
 ```
 
 Например, установить файловый менеджер:

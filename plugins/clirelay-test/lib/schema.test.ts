@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { groupProvidersByBaseUrl, MODEL_FIELDS, modelPatchSchema, providerIdSchema, type ProviderView } from "./schema";
 
-const view = (id: string, baseUrl: string): ProviderView => ({ id, baseUrl, api: "openai-completions", apiKeySet: true, models: [] });
+const view = (id: string, baseUrl: string): ProviderView => ({ id, baseUrl, api: "openai-completions", apiKeySet: true, models: [], disabled: [] });
 
 describe("groupProvidersByBaseUrl", () => {
   it("одинаковый адрес → одна группа, порядок провайдеров и групп сохранён", () => {

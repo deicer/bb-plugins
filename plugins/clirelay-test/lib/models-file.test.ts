@@ -101,6 +101,7 @@ describe("мутации", () => {
       id: "router-test", name: undefined, baseUrl: "http://localhost:4010/v1",
       api: "openai-completions", apiKeySet: true,
       models: [{ id: "m1", contextWindow: 1000, compat: { supportsStore: false } }],
+      disabled: [],
     });
     expect(JSON.stringify(view)).not.toContain("test-key");
   });
