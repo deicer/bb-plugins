@@ -137,3 +137,33 @@ test("discovers Google Antigravity, caches host usage until refresh/event, skips
   assert.equal(failed.providers[0]!.accounts[0]!.usage?.status, "ok");
   assert.equal(failed.providers[1]!.accounts[0]!.usage?.status, "error");
 });
+
+test("merges provider usage resources so Command Code reaches the rings", async () => {
+  let handlers: Record<string, (input: unknown, context: unknown) => Promise<unknown>>;
+  const nativeProviders = [{ id: "codex", displayName: "Codex" }];
+  const allProviders = [...nativeProviders, { id: "command-code", displayName: "Command Code" }];
+  const bb = {
+    hosts: { experimental_client: () => ({ call: async () => ({ accountId: "workspace-1", email: "user@example.com", availableCount: 0, credits: [], windows: [] }) }) },
+    storage: { kv: { get: async () => undefined, set: async () => {} } },
+    sdk: {
+      system: { config: async () => ({ primaryHostId: "host-1" }) },
+      providers: { list: async (args?: { capability?: string }) => args?.capability === "usage" ? nativeProviders : allProviders },
+      plugins: {
+        experimental_discoverRpc: async () => [{ pluginId: "command-code", method: "provider-usage.v1.listResources" }, { pluginId: "command-code", method: "provider-usage.v1.getResource" }],
+        callRpc: async ({ pluginId, method, input }: { pluginId: string; method: string; input: any }) => {
+          if (pluginId === "bb--provider-usage") return { machines: [{ id: "host-1", displayName: "Laptop", status: "connected", error: null, providers: [] }] };
+          if (method === "provider-usage.v1.listResources") return { resources: [{ accountKey: null, id: "resource-1", providerId: "command-code", label: "Command Code", scope: { kind: "host", hostId: "host-1", hostName: "Laptop" } }] };
+          assert.equal(input.resourceId, "resource-1");
+          return { accountKey: null, observedAt: Date.now(), usage: { status: "ok", plan: null, accountEmail: "user@example.com", planLabel: "Individual", windows: [{ kind: "custom", id: "credits", label: "Credits · 39% left", usedPercent: 61, resetsAt: null, model: null, cost: null }] } };
+        },
+      },
+    },
+    rpc: { register: (_contract: unknown, registered: typeof handlers) => { handlers = registered; }, experimental_invalidate: () => {} },
+    events: { on: () => {} },
+  } as unknown as BbPluginApi;
+  plugin(bb);
+  const result = await handlers!.overview!({ hostId: "host-1" }, {});
+  const commandCode = (result as any).providers.find((provider: any) => provider.id === "command-code");
+  assert.equal(commandCode.enabled, true);
+  assert.equal(commandCode.accounts[0].usage.windows[0].usedPercent, 61);
+});

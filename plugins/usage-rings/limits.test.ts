@@ -17,6 +17,8 @@ test("weekly is used only when no 5-hour window exists", () => {
   assert.equal(selectWindow([{ ...fiveHour, label: "Daily limit" }]), null);
   assert.equal(selectWindow([]), null);
   assert.equal(selectWindow([{ ...fiveHour, label: "5 hours" }])?.usedPercent, 30);
+  assert.equal(selectWindow([{ ...fiveHour, label: "5h · 100% left" }])?.usedPercent, 30);
+  assert.equal(selectWindow([{ ...weekly, label: "7d · 100% left" }])?.usedPercent, 99);
   const sonnet = { ...weekly, label: "Weekly · Sonnet", usedPercent: 100 };
   assert.equal(selectWindow([sonnet, weekly]), weekly);
 });
