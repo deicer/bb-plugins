@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import * as Popover from "@radix-ui/react-popover";
 import {
@@ -7,12 +7,13 @@ import {
   useBbContext, experimental_useSidebarThreads,
 } from "@get-bb/plugin-sdk/app";
 import { contract, type Account, type Provider } from "./contract";
-import { groupWindows, remainingPercent, selectWindow, type UsageWindow } from "./limits";
+import { formatResetLabel, groupWindows, remainingPercent, selectWindow, type UsageWindow } from "./limits";
 import { getRailTarget, mountRail, subscribeRail } from "./rail";
 import { ResetButton, ResetsDialog } from "./resets";
 import "./app.css";
 
 const pluginId = "usage-rings";
+const TOOLTIP_DELAY_MS = 120;
 function useOverview() {
   const { threadId } = useBbContext();
   const { threads } = experimental_useSidebarThreads({ experimental_lifecycles: ["active", "archived"] });
@@ -36,14 +37,7 @@ function windowLabel(window: UsageWindow) {
     : /^(Weekly limit|Weekly|7d)$/i.test(window.label) ? "Неделя" : window.label;
 }
 function resetLabel(value: string | null) {
-  if (!value) return "Время сброса не указано";
-  const at = new Date(value);
-  if (!Number.isFinite(at.getTime())) return "Время сброса не указано";
-  const minutes = Math.ceil((at.getTime() - Date.now()) / 60_000);
-  if (minutes <= 0) return "Ожидается обновление окна";
-  const duration = minutes >= 1440 ? `${Math.floor(minutes / 1440)} д ${Math.floor(minutes % 1440 / 60)} ч`
-    : minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes} мин`;
-  return `Сброс через ${duration}`;
+  return formatResetLabel(value) ?? "Время сброса не указано";
 }
 function accountMessage(account: Account) {
   switch (account.usage?.status) {
@@ -65,12 +59,58 @@ function ProviderRing({ provider, error, hostId, resetOpen, onShowResets }: {
   const percent = window && !error ? remainingPercent(window) : null;
   const refresh = experimental_useRpcMutation({ contract, method: "refresh" });
   const refreshError = refresh.error ? "Не удалось обновить лимиты." : null;
-  const title = `${provider.displayName}: ${percent === null ? "лимит недоступен" : `${window!.group ? `${window!.group} · ` : ""}${windowLabel(window!)} — осталось ${percent}%`}`;
+  const resetText = percent !== null && window ? formatResetLabel(window.resetsAt) : null;
+  const summaryLine = percent === null ? "Лимит недоступен" : `${window!.group ? `${window!.group} · ` : ""}${windowLabel(window!)} — осталось ${percent}%`;
+  const ariaLabel = `${provider.displayName}: ${percent === null ? "лимит недоступен" : `${summaryLine}${resetText ? ` · ${resetText}` : ""}`}`;
   const tone = percent === null ? "unknown" : percent <= 5 ? "critical" : percent <= 20 ? "warning" : "normal";
   const resetTarget = account ? { hostId, accountId: account.id } : null;
-  return <Popover.Root>
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  const [tooltip, setTooltip] = useState<{ left: number; top: number } | null>(null);
+  const tooltipId = useId();
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearHoverTimer = useCallback(() => {
+    if (hoverTimer.current !== null) {
+      globalThis.clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+  }, []);
+  const hideTooltip = useCallback(() => {
+    clearHoverTimer();
+    setTooltip(null);
+  }, [clearHoverTimer]);
+  const showTooltip = useCallback((element: HTMLElement, delayMs: number) => {
+    if (popoverOpen) return;
+    clearHoverTimer();
+    const openAtRect = () => {
+      const rect = element.getBoundingClientRect();
+      const rawTop = Math.round(rect.top + rect.height / 2);
+      const viewportHeight = globalThis.innerHeight || 0;
+      const top = viewportHeight > 96 ? Math.max(48, Math.min(viewportHeight - 48, rawTop)) : rawTop;
+      setTooltip({ left: Math.round(rect.right + 10), top });
+    };
+    if (delayMs <= 0) openAtRect();
+    else hoverTimer.current = globalThis.setTimeout(openAtRect, delayMs);
+  }, [clearHoverTimer, popoverOpen]);
+  useEffect(() => clearHoverTimer, [clearHoverTimer]);
+  useEffect(() => {
+    if (!tooltip) return;
+    const close = () => hideTooltip();
+    globalThis.addEventListener("scroll", close, true);
+    globalThis.addEventListener("resize", close);
+    return () => {
+      globalThis.removeEventListener("scroll", close, true);
+      globalThis.removeEventListener("resize", close);
+    };
+  }, [hideTooltip, tooltip]);
+  return <Popover.Root open={popoverOpen} onOpenChange={next => { setPopoverOpen(next); if (next) hideTooltip(); }}>
     <Popover.Trigger asChild>
-      <button type="button" className="usage-ring-button" data-provider-id={provider.id} data-tone={tone} aria-label={title} title={title}>
+      <button type="button" className="usage-ring-button" data-provider-id={provider.id} data-tone={tone}
+        aria-label={ariaLabel} aria-describedby={tooltip ? tooltipId : undefined}
+        onPointerEnter={event => { if (event.pointerType !== "touch") showTooltip(event.currentTarget, TOOLTIP_DELAY_MS); }}
+        onPointerLeave={hideTooltip}
+        onPointerDown={hideTooltip}
+        onFocus={event => { if (event.currentTarget.matches(":focus-visible")) showTooltip(event.currentTarget, 0); }}
+        onBlur={hideTooltip}>
         <span className="usage-ring-art">
           <svg className="usage-ring-progress" viewBox="0 0 32 32" aria-hidden="true">
             <circle className="usage-ring-track" cx="16" cy="16" r="13" />
@@ -81,6 +121,16 @@ function ProviderRing({ provider, error, hostId, resetOpen, onShowResets }: {
         <span className="usage-ring-percent" aria-hidden="true">{percent === null ? "—" : `${percent}%`}</span>
       </button>
     </Popover.Trigger>
+    {tooltip && !popoverOpen && createPortal(
+      <div id={tooltipId} role="tooltip" className="usage-rings-tooltip"
+        style={{ left: `${tooltip.left}px`, top: `${tooltip.top}px` }}
+        data-bb-plugin-root="" data-bb-plugin={pluginId} data-usage-rings-owned="">
+        <div className="usage-rings-tooltip-title">{provider.displayName}</div>
+        <div className={percent === null ? "usage-rings-tooltip-meta" : "usage-rings-tooltip-value"}>{summaryLine}</div>
+        {resetText && <div className="usage-rings-tooltip-meta">{resetText}</div>}
+      </div>,
+      document.body,
+    )}
     <Popover.Portal>
       <Popover.Content className="usage-rings-popover" side="right" align="end" sideOffset={12} collisionPadding={12}
         onInteractOutside={event => { if (resetOpen) event.preventDefault(); }}

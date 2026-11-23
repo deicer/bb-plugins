@@ -49,6 +49,17 @@ export function remainingPercent(window: UsageWindow): number {
   return Math.round(Math.max(0, Math.min(100, 100 - window.usedPercent)));
 }
 
+export function formatResetLabel(value: string | null, now = Date.now()): string | null {
+  if (!value) return null;
+  const at = new Date(value);
+  if (!Number.isFinite(at.getTime())) return null;
+  const minutes = Math.ceil((at.getTime() - now) / 60_000);
+  if (minutes <= 0) return "Ожидается обновление окна";
+  const duration = minutes >= 1440 ? `${Math.floor(minutes / 1440)} д ${Math.floor(minutes % 1440 / 60)} ч`
+    : minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes} мин`;
+  return `Сброс через ${duration}`;
+}
+
 export function orderedProviders<T extends { id: string }>(providers: readonly T[], preferences: readonly ProviderPreference[]): T[] {
   const byId = new Map(providers.map((provider) => [provider.id, provider]));
   const ordered = preferences.flatMap(({ id }) => {

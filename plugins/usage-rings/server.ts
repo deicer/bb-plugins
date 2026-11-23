@@ -2,7 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { isAntigravityProvider } from "./antigravity-usage.ts";
 import { contract, hostContract, preferencesSchema, usageResponseSchema, type Overview, type Usage } from "./contract.ts";
-import { orderedProviders } from "./limits.ts";
+import { orderedProviders, type ProviderPreference } from "./limits.ts";
 
 const ANTIGRAVITY_CACHE_TTL_MS = 60_000;
 const externalResourceListSchema = z.object({ resources: z.array(z.object({
@@ -12,9 +12,37 @@ const externalResourceListSchema = z.object({ resources: z.array(z.object({
 const externalUsageSchema = z.object({
   usage: z.object({
     status: z.string(), accountEmail: z.string().nullable().optional(), planLabel: z.string().nullable().optional(),
+    message: z.string().optional(),
     windows: z.array(z.object({ label: z.string(), usedPercent: z.number(), resetsAt: z.string().nullable().optional() })).optional(),
   }),
 });
+
+interface ExternalResourceEntry {
+  providerId: string;
+  id: string;
+  label: string;
+  displayName: string;
+  usage: Usage | null;
+}
+
+function normalizeExternalUsage(raw: z.infer<typeof externalUsageSchema>["usage"]): Usage {
+  if (raw.status === "ok") {
+    return {
+      status: "ok",
+      accountEmail: raw.accountEmail ?? null,
+      planLabel: raw.planLabel ?? null,
+      windows: (raw.windows ?? []).map(window => ({
+        label: window.label,
+        usedPercent: window.usedPercent,
+        resetsAt: window.resetsAt ?? null,
+      })),
+    };
+  }
+  if (raw.status === "not_installed" || raw.status === "unauthenticated" || raw.status === "expired") {
+    return raw.message ? { status: raw.status, message: raw.message } : { status: raw.status };
+  }
+  return { status: "error", message: raw.message ?? "Не удалось получить лимиты." };
+}
 
 function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
@@ -58,31 +86,56 @@ export default function plugin(bb: BbPluginApi) {
     return raceAbort(pending, signal);
   }
 
-  async function readExternalUsage(hostId: string | null, providers: any[], refresh = false, signal?: AbortSignal) {
-    const methods = await bb.sdk.plugins.experimental_discoverRpc({ method: "provider-usage.v1.listResources", signal });
-    const listMethods = methods.filter(method => method.method === "provider-usage.v1.listResources");
-    const result: { providerId: string; id: string; label: string; usage: any }[] = [];
-    for (const method of listMethods) {
-      const listed = externalResourceListSchema.parse(await bb.sdk.plugins.callRpc({
-        pluginId: method.pluginId, method: method.method, input: {}, outputSchema: externalResourceListSchema, signal,
-      }));
-      const getMethod = methods.find(candidate => candidate.pluginId === method.pluginId && candidate.method === "provider-usage.v1.getResource");
-      if (!getMethod) continue;
-      for (const resource of listed.resources) {
-        if (resource.scope.kind === "host" && resource.scope.hostId !== hostId) continue;
+  async function readExternalUsage(
+    hostId: string | null,
+    providers: { id: string; displayName: string }[],
+    saved: readonly ProviderPreference[],
+    refresh = false,
+    signal?: AbortSignal,
+  ): Promise<ExternalResourceEntry[]> {
+    const discover = bb.sdk.plugins.experimental_discoverRpc;
+    if (typeof discover !== "function") return [];
+    const [listDiscovered, getDiscovered] = await Promise.all([
+      discover({ method: "provider-usage.v1.listResources", signal }),
+      discover({ method: "provider-usage.v1.getResource", signal }),
+    ]);
+    const listMethods = listDiscovered.filter(method => method.method === "provider-usage.v1.listResources");
+    const getByPlugin = new Map(
+      getDiscovered
+        .filter(method => method.method === "provider-usage.v1.getResource")
+        .map(method => [method.pluginId, method]),
+    );
+    const disabledIds = new Set(saved.filter(pref => !pref.enabled).map(pref => pref.id));
+    const entries = await Promise.all(listMethods.map(async method => {
+      const getMethod = getByPlugin.get(method.pluginId);
+      if (!getMethod) return [] as ExternalResourceEntry[];
+      let listed: z.infer<typeof externalResourceListSchema>;
+      try {
+        listed = externalResourceListSchema.parse(await bb.sdk.plugins.callRpc({
+          pluginId: method.pluginId, method: method.method, input: {}, outputSchema: externalResourceListSchema, signal,
+        }));
+      } catch {
+        return [] as ExternalResourceEntry[];
+      }
+      const matching = listed.resources.filter(resource => resource.scope.kind !== "host" || resource.scope.hostId === hostId);
+      return Promise.all(matching.map(async (resource): Promise<ExternalResourceEntry | null> => {
+        const displayName = providers.find(provider => provider.id === resource.providerId)?.displayName ?? resource.label;
+        if (disabledIds.has(resource.providerId)) {
+          return { providerId: resource.providerId, id: resource.id, label: resource.label, displayName, usage: null };
+        }
         try {
           const data = externalUsageSchema.parse(await bb.sdk.plugins.callRpc({
             pluginId: getMethod.pluginId, method: getMethod.method,
             input: { resourceId: resource.id, refresh }, outputSchema: externalUsageSchema, signal,
           }));
-          result.push({ providerId: resource.providerId, id: resource.id, label: resource.label, usage: data.usage });
-        } catch { /* One external provider must not hide native limits. */ }
-      }
-    }
-    return result.map(resource => ({
-      ...resource,
-      displayName: providers.find(provider => provider.id === resource.providerId)?.displayName ?? resource.label,
+          return { providerId: resource.providerId, id: resource.id, label: resource.label, displayName, usage: normalizeExternalUsage(data.usage) };
+        } catch {
+          /* One external provider must not hide native limits. */
+          return null;
+        }
+      }));
     }));
+    return entries.flat().filter((entry): entry is ExternalResourceEntry => entry !== null);
   }
 
   async function resetTarget(input: { hostId: string | null; accountId: string }, signal?: AbortSignal) {
@@ -136,31 +189,32 @@ export default function plugin(bb: BbPluginApi) {
     } catch {
       error = "Не удалось прочитать лимиты. Проверьте, включён ли встроенный Provider Usage.";
     }
-    let external: Awaited<ReturnType<typeof readExternalUsage>> = [];
-    try { external = await readExternalUsage(selectedHost, allProviders, force, signal); } catch { /* Native provider limits remain available. */ }
-    const externalProviders = external.map(resource => allProviders.find(provider => provider.id === resource.providerId) ?? {
-      id: resource.providerId, displayName: resource.displayName, logoUrl: null, icon: null, strings: null,
-    });
-    const roster = [...usageRoster, ...antigravityProviders, ...externalProviders.filter(provider => !usageRoster.some(native => native.id === provider.id) && !antigravityIds.has(provider.id))];
+    let external: ExternalResourceEntry[] = [];
+    try { external = await readExternalUsage(selectedHost, allProviders, saved, force, signal); } catch { /* Native provider limits remain available. */ }
+    const seenRosterIds = new Set([...nativeUsageIds, ...antigravityIds]);
+    const externalProviders = [] as { id: string; displayName: string; logoUrl?: string | null; icon?: Overview["providers"][number]["icon"]; strings?: Overview["providers"][number]["strings"] }[];
+    for (const resource of external) {
+      if (seenRosterIds.has(resource.providerId)) continue;
+      seenRosterIds.add(resource.providerId);
+      externalProviders.push(allProviders.find(provider => provider.id === resource.providerId) ?? {
+        id: resource.providerId, displayName: resource.displayName, logoUrl: null, icon: null, strings: null,
+      });
+    }
+    const roster = [...usageRoster, ...antigravityProviders, ...externalProviders];
     const providers = roster.map(provider => {
       const isCustomAntigravity = antigravityIds.has(provider.id);
       const accounts = isCustomAntigravity
         ? (antigravityUsage ? [{ id: `${provider.id}-account`, accountLabel: null, usage: antigravityUsage }] : [])
         : [
           ...(machine?.providers.filter(p => p.providerId === provider.id) ?? []),
-          ...external.filter(resource => resource.providerId === provider.id).map(resource => ({
-            id: resource.id, accountLabel: resource.label,
-            usage: resource.usage.status === "ok" ? {
-              status: "ok" as const, accountEmail: resource.usage.accountEmail ?? null,
-              planLabel: resource.usage.planLabel ?? null,
-              windows: (resource.usage.windows ?? []).map((window: { label: string; usedPercent: number; resetsAt?: string | null }) => ({ label: window.label, usedPercent: window.usedPercent, resetsAt: window.resetsAt ?? null })),
-            } : { status: "error" as const, message: "Не удалось получить лимиты." },
-          })),
+          ...external
+            .filter(resource => resource.providerId === provider.id && resource.usage !== null)
+            .map(resource => ({ id: resource.id, accountLabel: resource.label, usage: resource.usage! })),
         ];
       return {
         id: provider.id, displayName: provider.displayName, logoUrl: provider.logoUrl ?? null, icon: provider.icon ?? null,
         strings: { iconTint: provider.strings?.iconTint ?? null }, accounts,
-        enabled: saved.find(p => p.id === provider.id)?.enabled ?? (isCustomAntigravity ? true : accounts.some(p => p.usage?.status !== "not_installed")),
+        enabled: saved.find(p => p.id === provider.id)?.enabled ?? accounts.some(p => p.usage?.status !== "not_installed"),
       };
     });
     return { providers: orderedProviders(providers, saved), preferences: saved, machineName: machine?.displayName ?? null, error };
