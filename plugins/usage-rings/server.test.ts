@@ -138,23 +138,47 @@ test("discovers Google Antigravity, caches host usage until refresh/event, skips
   assert.equal(failed.providers[1]!.accounts[0]!.usage?.status, "error");
 });
 
-test("merges provider usage resources so Command Code reaches the rings", async () => {
+test("merges provider usage resources with strict RPC discovery, deduplicates providers, and skips disabled external providers", async () => {
+  const values = new Map<string, unknown>();
+  const getResourceCalls: string[] = [];
   let handlers: Record<string, (input: unknown, context: unknown) => Promise<unknown>>;
   const nativeProviders = [{ id: "codex", displayName: "Codex" }];
   const allProviders = [...nativeProviders, { id: "command-code", displayName: "Command Code" }];
+  const discovered = [
+    { pluginId: "command-code", method: "provider-usage.v1.listResources" },
+    { pluginId: "command-code", method: "provider-usage.v1.getResource" },
+  ];
   const bb = {
     hosts: { experimental_client: () => ({ call: async () => ({ accountId: "workspace-1", email: "user@example.com", availableCount: 0, credits: [], windows: [] }) }) },
-    storage: { kv: { get: async () => undefined, set: async () => {} } },
+    storage: { kv: { get: async (key: string) => values.get(key), set: async (key: string, value: unknown) => { values.set(key, value); } } },
     sdk: {
       system: { config: async () => ({ primaryHostId: "host-1" }) },
       providers: { list: async (args?: { capability?: string }) => args?.capability === "usage" ? nativeProviders : allProviders },
       plugins: {
-        experimental_discoverRpc: async () => [{ pluginId: "command-code", method: "provider-usage.v1.listResources" }, { pluginId: "command-code", method: "provider-usage.v1.getResource" }],
+        experimental_discoverRpc: async (args?: { method?: string }) =>
+          args?.method ? discovered.filter(entry => entry.method === args.method) : discovered,
         callRpc: async ({ pluginId, method, input }: { pluginId: string; method: string; input: any }) => {
           if (pluginId === "bb--provider-usage") return { machines: [{ id: "host-1", displayName: "Laptop", status: "connected", error: null, providers: [] }] };
-          if (method === "provider-usage.v1.listResources") return { resources: [{ accountKey: null, id: "resource-1", providerId: "command-code", label: "Command Code", scope: { kind: "host", hostId: "host-1", hostName: "Laptop" } }] };
-          assert.equal(input.resourceId, "resource-1");
-          return { accountKey: null, observedAt: Date.now(), usage: { status: "ok", plan: null, accountEmail: "user@example.com", planLabel: "Individual", windows: [{ kind: "custom", id: "credits", label: "Credits · 39% left", usedPercent: 61, resetsAt: null, model: null, cost: null }] } };
+          if (method === "provider-usage.v1.listResources") {
+            return {
+              resources: [
+                { accountKey: null, id: "resource-1", providerId: "command-code", label: "Work", scope: { kind: "host", hostId: "host-1" } },
+                { accountKey: null, id: "resource-2", providerId: "command-code", label: "Personal", scope: { kind: "host", hostId: "host-1" } },
+              ],
+            };
+          }
+          getResourceCalls.push(input.resourceId);
+          return {
+            accountKey: null,
+            observedAt: Date.now(),
+            usage: {
+              status: "ok",
+              plan: null,
+              accountEmail: `${input.resourceId}@example.com`,
+              planLabel: "Individual",
+              windows: [{ kind: "custom", id: "credits", label: "Credits · 39% left", usedPercent: 61, resetsAt: null }],
+            },
+          };
         },
       },
     },
@@ -162,8 +186,43 @@ test("merges provider usage resources so Command Code reaches the rings", async 
     events: { on: () => {} },
   } as unknown as BbPluginApi;
   plugin(bb);
-  const result = await handlers!.overview!({ hostId: "host-1" }, {});
-  const commandCode = (result as any).providers.find((provider: any) => provider.id === "command-code");
-  assert.equal(commandCode.enabled, true);
-  assert.equal(commandCode.accounts[0].usage.windows[0].usedPercent, 61);
+  const result = contract.overview.output.parse(await handlers!.overview!({ hostId: "host-1" }, {}));
+  const commandCodes = result.providers.filter(provider => provider.id === "command-code");
+  assert.equal(commandCodes.length, 1, "multiple external resources for one provider must not duplicate the provider row");
+  assert.equal(commandCodes[0]!.enabled, true);
+  assert.equal(commandCodes[0]!.accounts.length, 2);
+  assert.deepEqual(getResourceCalls.sort(), ["resource-1", "resource-2"]);
+
+  // Disabling the external provider keeps it visible in settings without polling getResource.
+  await handlers!.savePreferences!([{ id: "codex", enabled: true }, { id: "command-code", enabled: false }], {});
+  getResourceCalls.length = 0;
+  const disabledResult = contract.overview.output.parse(await handlers!.overview!({ hostId: "host-1" }, {}));
+  const disabledProvider = disabledResult.providers.find(provider => provider.id === "command-code");
+  assert.ok(disabledProvider);
+  assert.equal(disabledProvider.enabled, false);
+  assert.equal(disabledProvider.accounts.length, 0);
+  assert.deepEqual(getResourceCalls, []);
+});
+
+test("defaults Google Antigravity to disabled when agy CLI is not installed", async () => {
+  let handlers: Record<string, (input: unknown, context: unknown) => Promise<unknown>>;
+  const allProviders = [{ id: "acp-antigravity-acp", displayName: "Google Antigravity" }];
+  const bb = {
+    hosts: { experimental_client: () => ({ call: async () => ({ status: "not_installed", message: "Antigravity CLI (agy) не найден." }) }) },
+    storage: { kv: { get: async () => undefined, set: async () => {} } },
+    sdk: {
+      system: { config: async () => ({ primaryHostId: "host-1" }) },
+      providers: { list: async (args?: { capability?: string }) => args?.capability === "usage" ? [] : allProviders },
+      plugins: {
+        callRpc: async () => ({ machines: [{ id: "host-1", displayName: "Laptop", status: "connected", error: null, providers: [] }] }),
+      },
+    },
+    rpc: { register: (_contract: unknown, registered: typeof handlers) => { handlers = registered; }, experimental_invalidate: () => {} },
+    events: { on: () => {} },
+  } as unknown as BbPluginApi;
+  plugin(bb);
+  const result = contract.overview.output.parse(await handlers!.overview!({ hostId: "host-1" }, {}));
+  assert.equal(result.providers.length, 1);
+  assert.equal(result.providers[0]!.id, "acp-antigravity-acp");
+  assert.equal(result.providers[0]!.enabled, false);
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { groupWindows, orderedProviders, remainingPercent, selectWindow } from "./limits.ts";
+import { formatResetLabel, groupWindows, orderedProviders, remainingPercent, selectWindow } from "./limits.ts";
 
 const weekly = { label: "Weekly limit", usedPercent: 99, resetsAt: null };
 const fiveHour = { label: "Five-hour limit", usedPercent: 30, resetsAt: null };
@@ -55,4 +55,14 @@ test("grouped Antigravity windows prioritize Gemini Models 5h or weekly over oth
     ["Claude and GPT models", 1],
     ["Gemini 4 Argon", 1],
   ]);
+});
+
+test("formatResetLabel formats minutes, hours, days, past timestamps, and invalid/null values", () => {
+  const now = Date.parse("2026-11-23T12:00:00Z");
+  assert.equal(formatResetLabel(null, now), null);
+  assert.equal(formatResetLabel("not-a-date", now), null);
+  assert.equal(formatResetLabel("2026-11-23T11:59:00Z", now), "Ожидается обновление окна");
+  assert.equal(formatResetLabel("2026-11-23T12:45:00Z", now), "Сброс через 45 мин");
+  assert.equal(formatResetLabel("2026-11-23T16:30:00Z", now), "Сброс через 4 ч 30 мин");
+  assert.equal(formatResetLabel("2026-11-25T15:00:00Z", now), "Сброс через 2 д 3 ч");
 });
