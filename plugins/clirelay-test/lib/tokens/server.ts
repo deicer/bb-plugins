@@ -169,17 +169,31 @@ async function writeSummary(
   threadId: string,
   turns: readonly TurnUsage[],
   freshContextWindow?: number | null,
+  currentTokPerSec?: number | null,
 ): Promise<void> {
   if (turns.length === 0) {
     await bb.storage.kv.delete(summaryKey(threadId));
     return;
   }
-  let modelContextWindow = freshContextWindow ?? null;
-  if (freshContextWindow === undefined) {
-    const previous = threadUsageSchema.safeParse(await bb.storage.kv.get<unknown>(summaryKey(threadId)));
-    modelContextWindow = previous.success ? previous.data.modelContextWindow : null;
-  }
-  await bb.storage.kv.set(summaryKey(threadId), summarizeTurns(threadId, turns, modelContextWindow));
+  const needPrevious = freshContextWindow === undefined || currentTokPerSec === undefined;
+  const previous = needPrevious
+    ? threadUsageSchema.safeParse(await bb.storage.kv.get<unknown>(summaryKey(threadId)))
+    : null;
+  const modelContextWindow = freshContextWindow !== undefined
+    ? freshContextWindow
+    : previous?.success ? previous.data.modelContextWindow : null;
+  const liveRate = currentTokPerSec === undefined
+    ? (previous?.success ? previous.data.currentTokPerSec : undefined)
+    : currentTokPerSec === null ? undefined : currentTokPerSec;
+  await bb.storage.kv.set(summaryKey(threadId), summarizeTurns(threadId, turns, modelContextWindow, liveRate));
+}
+
+async function clearCurrentRate(bb: BbPluginApi, threadId: string): Promise<boolean> {
+  const previous = threadUsageSchema.safeParse(await bb.storage.kv.get<unknown>(summaryKey(threadId)));
+  if (!previous.success || previous.data.currentTokPerSec === undefined) return false;
+  const { currentTokPerSec: _cleared, ...rest } = previous.data;
+  await bb.storage.kv.set(summaryKey(threadId), rest);
+  return true;
 }
 
 async function pruneThread(kv: Kv, threadId: string, now: number): Promise<TurnUsage[]> {
@@ -197,6 +211,7 @@ async function saveUsage(
   turnStartedAt: number | null,
   endedAt: number,
   execution: ExecutionInfo,
+  isActiveTurn: boolean,
 ): Promise<void> {
   const { threadId, turnId } = event;
   const record = makeTurnUsage({
@@ -211,7 +226,7 @@ async function saveUsage(
   });
   await bb.storage.kv.set(turnKey(threadId, turnId), record);
   const kept = await pruneThread(bb.storage.kv, threadId, Date.now());
-  await writeSummary(bb, threadId, kept, event.data.tokenUsage.modelContextWindow);
+  await writeSummary(bb, threadId, kept, event.data.tokenUsage.modelContextWindow, isActiveTurn ? (record.tokPerSec ?? null) : null);
 }
 
 async function saveContextWindowUsage(
@@ -222,10 +237,15 @@ async function saveContextWindowUsage(
   endedAt: number,
   execution: ExecutionInfo,
   antigravityLookup: AntigravityUsageLookup,
+  isActiveTurn: boolean,
 ): Promise<boolean> {
   const { threadId, turnId } = event;
   const existing = turnUsageSchema.safeParse(await bb.storage.kv.get<unknown>(turnKey(threadId, turnId)));
-  if (existing.success && existing.data.usageSource !== "contextWindow") return false;
+  if (
+    existing.success
+    && existing.data.usageSource !== "contextWindow"
+    && existing.data.usageSource !== "antigravityTranscript"
+  ) return false;
 
   const providerThreadId = event.data.providerThreadId;
   const enriched = providerThreadId
@@ -242,6 +262,7 @@ async function saveContextWindowUsage(
       threadId,
       turnId,
       tokenUsage: enriched,
+      usageSource: "antigravityTranscript",
       windowStartedAt,
       endedAt,
       turnStartedAt,
@@ -260,7 +281,7 @@ async function saveContextWindowUsage(
     });
   await bb.storage.kv.set(turnKey(threadId, turnId), record);
   const kept = await pruneThread(bb.storage.kv, threadId, Date.now());
-  await writeSummary(bb, threadId, kept, event.data.contextWindowUsage.modelContextWindow);
+  await writeSummary(bb, threadId, kept, event.data.contextWindowUsage.modelContextWindow, isActiveTurn ? (record.tokPerSec ?? null) : null);
   return true;
 }
 
@@ -406,17 +427,23 @@ async function syncThread(
     ].sort((a, b) => a.seq - b.seq);
     for (const usage of usages) {
       const turnStartedAt = started.get(usage.turnId) ?? await findStartedAt(bb, threadId, usage.seq, usage.turnId);
+      const isActiveTurn = !completed.has(usage.turnId);
       const endedAt = completed.get(usage.turnId) ?? usage.createdAt;
       const toolWindow = await findToolWindow(bb, threadId, usage.seq, usage.turnId);
       const windowStartedAt = toolWindow.known ? toolWindow.startedAt ?? turnStartedAt : undefined;
       const execution = await executionLookup(threadId, { seq: usage.seq, startedAt: turnStartedAt });
       if (usage.type === "thread/tokenUsage/updated") {
-        await saveUsage(bb, usage, windowStartedAt, turnStartedAt, endedAt, execution);
+        await saveUsage(bb, usage, windowStartedAt, turnStartedAt, endedAt, execution, isActiveTurn);
         changed = true;
       } else {
-        const saved = await saveContextWindowUsage(bb, usage, windowStartedAt, turnStartedAt, endedAt, execution, antigravityLookup);
+        const saved = await saveContextWindowUsage(bb, usage, windowStartedAt, turnStartedAt, endedAt, execution, antigravityLookup, isActiveTurn);
         if (saved) changed = true;
       }
+    }
+    const lastUsage = usages.at(-1);
+    const hasCompletedAfterLastUsage = completed.size > 0 && (!lastUsage || completed.has(lastUsage.turnId));
+    if (hasCompletedAfterLastUsage && await clearCurrentRate(bb, threadId)) {
+      changed = true;
     }
     const nextSeq = rows.length < EVENTS_PAGE_LIMIT ? Math.max(signalSequence, maxSeq) : maxSeq;
     await bb.storage.kv.set(sequenceKey(threadId), nextSeq);
@@ -493,6 +520,18 @@ export async function registerTokens(bb: BbPluginApi): Promise<void> {
       if (pending.get(thread.id) === current) pending.delete(thread.id);
     }
   });
+
+  for (const event of ["thread.idle", "thread.failed"] as const) {
+    bb.events.on(event, async ({ thread }) => {
+      try {
+        if (await clearCurrentRate(bb, thread.id)) {
+          bb.rpc.experimental_invalidate([threadTag(thread.id)]);
+        }
+      } catch (cause) {
+        bb.log.warn(`tokens clear current rate failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    });
+  }
 
   bb.events.on("thread.deleted", async ({ thread }) => {
     try {
