@@ -8,6 +8,7 @@
     { "name": "kanban-board", "source": "./plugins/kanban-board" },
     { "name": "clirelay-test", "source": "./plugins/clirelay-test" },
     { "name": "usage-rings", "source": "./plugins/usage-rings" },
+    { "name": "antigravity-quota", "source": "./plugins/antigravity-quota" },
     { "name": "ru", "source": "./plugins/ru" },
     { "name": "rail-folders", "source": "./plugins/rail-folders" }
   ]

@@ -55,6 +55,12 @@
 
 [Подробная документация usage-rings](plugins/usage-rings/README.md)
 
+### `antigravity-quota`
+
+Раздельный учёт личного (в BB) и семейного / прочих устройств расхода квоты Google Antigravity за 5 часов и неделю. Встраивается в карточку и tooltip `usage-rings` (без отдельной иконки в рейле): показывает строку `Я / Семья` и открывает модальное окно со статистикой по дням и последним ходам.
+
+[Подробная документация antigravity-quota](plugins/antigravity-quota/README.md)
+
 ### `rail-folders`
 
 Объединяет иконки левого рейла BB в папки. Позволяет создавать и переименовывать папки, выбирать их иконки, менять порядок папок и участников, а также перетаскивать иконки между папками и рейлом.
@@ -78,11 +84,13 @@ bb plugin install git:https://github.com/deicer/bb-plugins.git@main --plugin ses
 Вместо `session-history` можно указать другой идентификатор:
 
 ```text
+antigravity-quota
 clirelay-test
 file-manager-multi-host
 kanban-board
 rail-folders
 ru
+usage-rings
 ```
 
 Например, установить файловый менеджер:
