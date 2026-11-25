@@ -58,8 +58,10 @@ describe("текст бейджа", () => {
 });
 
 describe("текст строки треда", () => {
-  it("с дефолтами — прежняя сводка", () => {
+  it("с дефолтами — прежняя сводка; при активном ходе добавляет скорость текущего шага", () => {
     expect(formatThreadText(SAMPLE_THREAD, THREAD)).toBe("Σ 5.1M токенов · ~51.3 ток/с (эфф.)");
+    expect(formatThreadText({ ...SAMPLE_THREAD, currentTokPerSec: 89.2 }, THREAD))
+      .toBe("Σ 5.1M токенов · ~51.3 ток/с (эфф.) · шаг 89.2 ток/с");
     expect(formatThreadText({ total: 531_000, turns: 4, modelContextWindow: null }, THREAD)).toBe("Σ 531k токенов");
   });
 

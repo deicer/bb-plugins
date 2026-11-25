@@ -18,6 +18,7 @@ export function makeTurnUsage(input: {
   turnStartedAt: number | null;
   model?: string;
   providerId?: string;
+  usageSource?: TurnUsage["usageSource"];
   at: number;
 }): TurnUsage {
   const { last } = input.tokenUsage;
@@ -34,6 +35,7 @@ export function makeTurnUsage(input: {
   return {
     threadId: input.threadId,
     turnId: input.turnId,
+    ...(input.usageSource === undefined ? {} : { usageSource: input.usageSource }),
     input: last.inputTokens,
     cached: last.cachedInputTokens,
     ...(last.cacheReadInputTokens === undefined ? {} : { cacheRead: last.cacheReadInputTokens }),
@@ -92,6 +94,7 @@ export function summarizeTurns(
   threadId: string,
   turns: readonly TurnUsage[],
   modelContextWindow: number | null,
+  currentTokPerSec?: number,
 ): ThreadUsage {
   const rates = turns.flatMap((row) => row.tokPerSec === undefined ? [] : [row.tokPerSec]);
   const averageTokPerSec = rates.length === 0
@@ -107,6 +110,7 @@ export function summarizeTurns(
     total: turns.reduce((sum, row) => sum + row.total, 0),
     turns: turns.length,
     ...(averageTokPerSec === undefined ? {} : { averageTokPerSec }),
+    ...(currentTokPerSec === undefined ? {} : { currentTokPerSec }),
     modelContextWindow,
     ...(model === undefined ? {} : { model }),
   };

@@ -8,7 +8,7 @@ import { DEFAULT_TOKENS_DISPLAY, type BadgeFields, type ThreadFields } from "./d
 export type TurnTextInput = Pick<TurnUsage, "input" | "cached" | "output">
   & Partial<Pick<TurnUsage, "reasoning" | "tokPerSec" | "model" | "total" | "durationMs" | "usageSource">>;
 export type ThreadTextInput = Pick<ThreadUsage, "total" | "turns" | "modelContextWindow">
-  & Partial<Pick<ThreadUsage, "averageTokPerSec" | "model">>;
+  & Partial<Pick<ThreadUsage, "averageTokPerSec" | "currentTokPerSec" | "model">>;
 
 function trimDecimal(value: number): string {
   return value.toFixed(1).replace(/\.0$/, "");
@@ -109,6 +109,7 @@ export function formatThreadText(
   const segments: string[] = [];
   if (fields.total) segments.push(`Σ ${formatCompact(usage.total)} токенов`);
   if (fields.speed && usage.averageTokPerSec !== undefined) segments.push(`~${formatRate(usage.averageTokPerSec)} ток/с (эфф.)`);
+  if (fields.speed && usage.currentTokPerSec !== undefined) segments.push(`шаг ${formatRate(usage.currentTokPerSec)} ток/с`);
   if (fields.model && usage.model) segments.push(usage.model);
   if (fields.turns) segments.push(formatTurns(usage.turns));
   if (fields.contextWindow && usage.modelContextWindow !== null) segments.push(`окно ${formatCompact(usage.modelContextWindow)}`);

@@ -110,8 +110,8 @@ export const modelRequestRowSchema = z.object({
 export const turnUsageSchema = z.object({
   threadId: z.string().min(1),
   turnId: z.string().min(1),
-  /** Источник usage: полный `thread/tokenUsage/updated` или только `thread/contextWindowUsage/updated` (например, ACP/Gemini). */
-  usageSource: z.enum(["tokenUsage", "contextWindow"]).optional(),
+  /** Источник usage: полный `thread/tokenUsage/updated`, обогащённый transcript Antigravity или только `thread/contextWindowUsage/updated`. */
+  usageSource: z.enum(["tokenUsage", "antigravityTranscript", "contextWindow"]).optional(),
   input: tokenCount,
   cached: tokenCount,
   cacheRead: tokenCount.optional(),
@@ -135,6 +135,7 @@ export const threadUsageSchema = z.object({
   total: tokenCount,
   turns: z.number().int().nonnegative(),
   averageTokPerSec: tokenCount.optional(),
+  currentTokPerSec: tokenCount.optional(),
   modelContextWindow: tokenCount.nullable(),
   /** Модель самого свежего хода, у которого она есть; иначе поля нет. */
   model: z.string().min(1).optional(),

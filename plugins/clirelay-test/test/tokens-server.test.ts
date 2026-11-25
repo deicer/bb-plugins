@@ -704,4 +704,76 @@ describe("настройки отображения", () => {
     expect(await host.harness.behavior.callRpc("thread_usage", { threadId: THREAD }))
       .toMatchObject({ turns: 1, total: 100 });
   });
+
+  it("обновляет многошаговый ход Antigravity, показывает currentTokPerSec в реальном времени и сбрасывает по завершении", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const providerThreadId = `test-ag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const transcriptDir = path.join(os.homedir(), ".gemini", "antigravity-cli", "brain", providerThreadId, ".system_generated", "logs");
+    await fs.mkdir(transcriptDir, { recursive: true });
+    try {
+      await fs.writeFile(
+        path.join(transcriptDir, "transcript.jsonl"),
+        [
+          JSON.stringify({ type: "PLANNER_RESPONSE", created_at: new Date(eventAt(6_000)).toISOString(), input_tokens: 1_000, cache_read_tokens: 0, output_tokens: 200 }),
+          JSON.stringify({ type: "PLANNER_RESPONSE", created_at: new Date(eventAt(12_000)).toISOString(), input_tokens: 500, cache_read_tokens: 1_200, output_tokens: 400 }),
+        ].join("\n") + "\n",
+      );
+      const rows: EventRow[] = [
+        row("turn/started", 1, 1_000, { providerThreadId }),
+        row("thread/contextWindowUsage/updated", 2, 6_000, {
+          providerThreadId,
+          contextWindowUsage: { usedTokens: 1_200, modelContextWindow: 1_048_576, estimated: false },
+        }),
+      ];
+      const { host } = await load(rows);
+
+      await emit(host, 2);
+      expect(await host.bb.storage.kv.get(turnKey())).toMatchObject({
+        usageSource: "antigravityTranscript",
+        output: 200,
+        tokPerSec: 40,
+      });
+      expect(await host.harness.behavior.callRpc("thread_usage", { threadId: THREAD })).toMatchObject({
+        total: 1_200,
+        averageTokPerSec: 40,
+        currentTokPerSec: 40,
+      });
+
+      rows.push(
+        row("item/completed", 3, 8_000, { providerThreadId, item: { type: "commandExecution", id: "tool-1" } }),
+        row("thread/contextWindowUsage/updated", 4, 12_000, {
+          providerThreadId,
+          contextWindowUsage: { usedTokens: 2_100, modelContextWindow: 1_048_576, estimated: false },
+        }),
+      );
+      await emit(host, 4);
+      expect(await host.bb.storage.kv.get(turnKey())).toMatchObject({
+        usageSource: "antigravityTranscript",
+        output: 400,
+        durationMs: 4_000,
+        tokPerSec: 100,
+      });
+      expect(await host.harness.behavior.callRpc("thread_usage", { threadId: THREAD })).toMatchObject({
+        total: 2_100,
+        averageTokPerSec: 100,
+        currentTokPerSec: 100,
+      });
+
+      rows.push(row("turn/completed", 5, 12_000, { providerThreadId }));
+      await emit(host, 5);
+      const finished = await host.harness.behavior.callRpc("thread_usage", { threadId: THREAD }) as Record<string, unknown>;
+      expect(finished).toEqual({
+        threadId: THREAD,
+        total: 2_100,
+        turns: 1,
+        averageTokPerSec: 100,
+        modelContextWindow: 1_048_576,
+      });
+      expect(finished.currentTokPerSec).toBeUndefined();
+    } finally {
+      await fs.rm(path.join(os.homedir(), ".gemini", "antigravity-cli", "brain", providerThreadId), { recursive: true, force: true });
+    }
+  });
 });

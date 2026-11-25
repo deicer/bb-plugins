@@ -100,17 +100,23 @@ export function matchAntigravityUsage(
 
 export function createAntigravityUsageLookup(
   brainDir = path.join(os.homedir(), ".gemini", "antigravity-cli", "brain"),
+  retryDelayMs = 120,
 ): AntigravityUsageLookup {
   return async ({ providerThreadId, usedTokens, eventCreatedAt, modelContextWindow }) => {
     if (!isSafeProviderThreadId(providerThreadId)) return null;
     const transcriptPath = path.join(brainDir, providerThreadId, ".system_generated", "logs", "transcript.jsonl");
-    let raw: string;
-    try {
-      raw = await readFile(transcriptPath, "utf8");
-    } catch {
-      return null;
-    }
-    const entries = parseAntigravityTranscript(raw);
-    return matchAntigravityUsage(entries, usedTokens, eventCreatedAt, modelContextWindow);
+    const readAndMatch = async (): Promise<{ exists: boolean; usage: TokenUsage | null }> => {
+      let raw: string;
+      try {
+        raw = await readFile(transcriptPath, "utf8");
+      } catch {
+        return { exists: false, usage: null };
+      }
+      return { exists: true, usage: matchAntigravityUsage(parseAntigravityTranscript(raw), usedTokens, eventCreatedAt, modelContextWindow) };
+    };
+    const first = await readAndMatch();
+    if (first.usage || !first.exists || retryDelayMs <= 0) return first.usage;
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    return (await readAndMatch()).usage;
   };
 }
