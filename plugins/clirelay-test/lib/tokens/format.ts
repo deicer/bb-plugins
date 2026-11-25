@@ -107,8 +107,14 @@ export function formatThreadText(
   fields: ThreadFields = DEFAULT_TOKENS_DISPLAY.thread.fields,
 ): string {
   const segments: string[] = [];
+  const hideRedundantAverage =
+    usage.currentTokPerSec !== undefined &&
+    usage.averageTokPerSec !== undefined &&
+    usage.turns <= 1;
   if (fields.total) segments.push(`Σ ${formatCompact(usage.total)} токенов`);
-  if (fields.speed && usage.averageTokPerSec !== undefined) segments.push(`~${formatRate(usage.averageTokPerSec)} ток/с (эфф.)`);
+  if (fields.speed && usage.averageTokPerSec !== undefined && !hideRedundantAverage) {
+    segments.push(`~${formatRate(usage.averageTokPerSec)} ток/с (эфф.)`);
+  }
   if (fields.speed && usage.currentTokPerSec !== undefined) segments.push(`шаг ${formatRate(usage.currentTokPerSec)} ток/с`);
   if (fields.model && usage.model) segments.push(usage.model);
   if (fields.turns) segments.push(formatTurns(usage.turns));
